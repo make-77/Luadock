@@ -1,0 +1,91 @@
+# 使用最新 Alpine 作为基础镜像（构建阶段）
+FROM alpine:latest AS builder
+
+# 设置默认终端类型，确保 tput 正常工作
+ENV TERM=xterm-256color
+
+# 1. 安装构建和运行 Lua 所需的依赖（不删除系统自带 Lua）
+# 包括构建工具、开发头文件、证书等
+RUN apk add --no-cache \
+    curl \
+    build-base \
+    readline-dev \
+    ncurses-dev \
+    unzip \
+    pkgconfig \
+    ncurses
+
+# 2. 设置构建 Lua 的工作目录
+WORKDIR /usr/local/src
+
+# 3. 自动获取并编译安装 Lua 最新稳定版本
+RUN latest_version=$(curl -sL https://www.lua.org/ftp/ | \
+    grep -o 'lua-[0-9]\+\.[0-9]\+\.[0-9]\+\.tar\.gz' | \
+    sort -V | tail -n 1 | \
+    sed 's/lua-\([0-9.]*\)\.tar\.gz/\1/') && \
+    echo "Latest Lua version: $latest_version" && \
+    curl -LO https://www.lua.org/ftp/lua-$latest_version.tar.gz && \
+    tar zxf lua-$latest_version.tar.gz && \
+    cd lua-$latest_version && \
+    make linux test && \
+    make install
+
+# 使用 Alpine 构建最终运行镜像
+FROM alpine:latest
+
+# 设置默认终端类型，确保 tput 正常工作
+ENV TERM=xterm-256color
+
+# 4. 安装 Lua 运行所需的最小依赖（含 tput 支持）
+RUN apk add --no-cache \
+    readline \
+    ncurses
+
+# 5. 拷贝构建好的 Lua 文件到运行镜像
+COPY --from=builder /usr/local /usr/local
+
+# 6. 清理构建中间产物，并创建实际使用的默认工作目录
+RUN mkdir -p /app
+WORKDIR /app
+
+# 7. 创建默认启动脚本：打印 Lua 环境信息并进入交互终端
+RUN sh -c 'cat > /usr/local/bin/start-lua' <<'EOF'
+#!/bin/sh
+
+clear
+
+# 输出居中函数
+CENTER() {
+  term_width=$(tput cols)
+  padding=$(( (term_width - ${#1}) / 2 ))
+  printf "%*s%s\n" "$padding" "" "$1"
+}
+
+# 欢迎信息
+printf "\033[1;36m"
+CENTER "🐉 Welcome to Lua Development Environment (Alpine Slim)"
+printf "\033[0m\n"
+
+CENTER "🔹 Lua version:"
+lua -v | while read line; do CENTER "$line"; done
+
+CENTER "🔹 Lua package.path:"
+lua -e 'print(package.path)' | while read line; do CENTER "$line"; done
+
+CENTER "🔹 Lua package.cpath:"
+lua -e 'print(package.cpath)' | while read line; do CENTER "$line"; done
+
+# 提示准备完毕
+printf "\033[1;32m"
+CENTER "📦 Ready in /app"
+printf "\033[0m\n\n"
+
+# 启动交互终端
+exec sh
+EOF
+
+# 赋予启动脚本可执行权限
+RUN chmod +x /usr/local/bin/start-lua
+
+# 8. 设置容器默认启动命令
+CMD ["/usr/local/bin/start-lua"]
